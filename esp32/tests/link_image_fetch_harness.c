@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "activity.h"
 #include "image_fetch.h"
 #include "led_status.h"
 #include "noise_control.h"
@@ -527,6 +528,18 @@ bool led_status_draw_rect(int x, int y, int w, int h, const uint16_t *pixels) {
 }
 
 void led_status_draw_done(void) {
+}
+
+void led_status_set_note(const char *note) {
+    (void)note;
+}
+
+void activity_raise(activity_t source) {
+    (void)source;
+}
+
+void activity_clear(activity_t source) {
+    (void)source;
 }
 
 JRESULT jd_prepare(JDEC *jd, UINT (*infunc)(JDEC *, BYTE *, UINT), void *pool,

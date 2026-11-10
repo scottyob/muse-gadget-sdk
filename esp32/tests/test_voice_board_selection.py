@@ -18,12 +18,14 @@ PRODUCT_SOURCES = {
     "RESPEAKER_LITE": "voice_board_respeaker_lite.c",
     "RESPEAKER_XVF3800": "voice_board_xvf3800.c",
     "WAVESHARE_154G": "voice_board_waveshare_154g.c",
+    "RLCD42": "voice_board_rlcd42.c",
 }
 PRODUCT_STATUS = {
     "VOICE_PE": "VOICE_RING",
     "RESPEAKER_LITE": "RESPEAKER_LITE",
     "RESPEAKER_XVF3800": "NONE",
     "WAVESHARE_154G": "WAVESHARE_EPD154G",
+    "RLCD42": "WAVESHARE_S3_RLCD42",
 }
 
 

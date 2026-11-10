@@ -17,6 +17,7 @@ set(HOMEHUB_VOICE_BOARD_PRODUCTS
     RESPEAKER_LITE
     RESPEAKER_XVF3800
     WAVESHARE_154G
+    RLCD42
 )
 
 set(HOMEHUB_VOICE_BOARD_SELECTED "")
@@ -65,8 +66,23 @@ elseif(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "WAVESHARE_154G")
     endif()
     set(HOMEHUB_VOICE_BOARD_SOURCE "voice_board_waveshare_154g.c")
     list(APPEND GADGET_REQUIRES esp_codec_dev)
+elseif(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "RLCD42")
+    if(NOT CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42)
+        message(FATAL_ERROR
+            "HOMEHUB_VOICE_BOARD_RLCD42 requires HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42")
+    endif()
+    set(HOMEHUB_VOICE_BOARD_SOURCE "voice_board_rlcd42.c")
+    list(APPEND GADGET_REQUIRES esp_codec_dev)
 else()
     message(FATAL_ERROR "HOMEHUB_VOICE_BOARD_${HOMEHUB_VOICE_BOARD_SELECTED} has no driver source")
 endif()
 
 list(APPEND GADGET_SRCS "${HOMEHUB_VOICE_BOARD_SOURCE}")
+
+# "Hey Boeing" wake word on ESP-SR MultiNet (English), RLCD-4.2 only. The
+# model lives in the "model" partition; wake_word.c stays out of every
+# build that doesn't select a MultiNet model.
+if(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "RLCD42" AND CONFIG_SR_MN_EN_MULTINET6_QUANT)
+    list(APPEND GADGET_SRCS "wake_word.c")
+    list(APPEND GADGET_REQUIRES esp-sr)
+endif()

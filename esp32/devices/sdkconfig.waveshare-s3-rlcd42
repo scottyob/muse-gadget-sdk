@@ -1,0 +1,71 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Waveshare ESP32-S3-RLCD-4.2: ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB octal
+# PSRAM), a 4.2 inch 400x300 (landscape) monochrome reflective LCD on a
+# Sitronix ST7305 over SPI (no backlight, no status LED), an ES8311 speaker
+# codec with onboard speaker, an ES7210 dual-microphone array, an SHTC3
+# temperature/humidity sensor, a PCF85063 RTC and a microSD slot. The console
+# is the S3's USB-Serial-JTAG; there is no UART bridge. Pinout from
+# Waveshare's schematic; the ST7305 init sequence follows Waveshare's own
+# driver. Load last, after sdkconfig.defaults (see README.md in this
+# directory).
+#
+# Status-screen build: the display shows the status bars, the pixel-art
+# animation, the connected dot and images from Muse, and voice runs over
+# the ES8311/ES7210 (push-to-talk, realtime calls and the wake word).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# The reflective LCD shows the status; there is no status LED.
+CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42=y
+# Advertise as MuseGadget-Disp-XXXXXX like the other display boards.
+CONFIG_HOMEHUB_BLE_NAME_SUFFIX="-Disp"
+# The BOOT button, active low (the board has an external pull-up).
+CONFIG_HOMEHUB_BUTTON_GPIO=0
+
+# 16 MB flash, dual I/O.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# 8 MB octal PSRAM (N16R8).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_MODE_QUAD=n
+CONFIG_SPIRAM_SPEED_80M=y
+
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# The BLE controller already takes ~70 KB of internal RAM on the S3; keep the
+# NimBLE host's allocations in PSRAM so pairing has room.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# Stock push-to-talk voice through the onboard ES7210 mics and ES8311 speaker.
+CONFIG_HOMEHUB_VOICE=y
+CONFIG_HOMEHUB_VOICE_BOARD_RLCD42=y
+
+# Live voice calls with Muse (experimental, PR #275): tap BOOT to call,
+# tap again to hang up; holding still sends a voice note. Half duplex on
+# this board (no echo cancellation), so the mic shuts while Muse talks.
+CONFIG_MUSE_REALTIME_VOICE=y
+CONFIG_MUSE_REALTIME_VOICE_GREETING=y
+
+# "Hey Boeing" wake word: ESP-SR MultiNet6 (English) listens on-device
+# while the gadget is idle, and a detection starts a call like a tap
+# does. The model ships in the "model" partition (see partitions.csv).
+CONFIG_SR_MN_EN_MULTINET6_QUANT=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# CONFIG_MBEDTLS_HARDWARE_AES is not set

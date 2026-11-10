@@ -49,6 +49,9 @@
 #              Waveshare ESP32-S3-1.54inch-ePaper V2 with a 200x200 e-paper
 #   waveshare-s3-epaper-154g
 #              Waveshare ESP32-S3-ePaper-1.54G with a 200x200 four-colour e-paper
+#   waveshare-s3-rlcd42
+#              Waveshare ESP32-S3-RLCD-4.2 (ESP32-S3) with a 4.2 inch
+#              monochrome reflective LCD
 #   waveshare-s3-lcd-35
 #              Waveshare ESP32-S3-Touch-LCD-3.5 with a 320x480 status screen
 #
@@ -56,7 +59,7 @@
 # matching serial port, if there is exactly one.
 set -euo pipefail
 
-usage() { sed -n '16,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '16,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 [ $# -ge 1 ] || usage 2
 case "$1" in -h|--help) usage ;; esac
@@ -135,6 +138,12 @@ case "$BOARD" in
     TARGET=esp32s3
     DEFAULTS="$DEFAULTS;devices/sdkconfig.$BOARD"
     # The S3's own USB-Serial-JTAG.
+    PORTS="/dev/cu.usbmodem* /dev/ttyACM*"
+    ;;
+  waveshare-s3-rlcd42)
+    TARGET=esp32s3
+    DEFAULTS="$DEFAULTS;devices/sdkconfig.waveshare-s3-rlcd42"
+    # The S3's own USB-Serial-JTAG; no UART bridge on this board.
     PORTS="/dev/cu.usbmodem* /dev/ttyACM*"
     ;;
   *) echo "error: unknown board '$BOARD'" >&2; usage 2 ;;

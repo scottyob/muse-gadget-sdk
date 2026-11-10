@@ -15,9 +15,13 @@
  */
 
 #include "image_fetch.h"
+#include "activity.h"
 #include "led_status.h"
 #include "noise_control.h"
 #include "sdkconfig.h"
+#if CONFIG_SR_MN_EN_MULTINET6_QUANT
+#include "wake_word.h"
+#endif
 
 #if CONFIG_HOMEHUB_DISPLAY_COMMANDS
 
@@ -57,10 +61,15 @@ static const char *TAG = "link.image";
 // scratch, and the receive buffer needs one contiguous block, so without
 // PSRAM it rarely fits next to the Noise session.
 #define FETCH_HTTP_BYTES    (6 * 1024)
-#if CONFIG_HOMEHUB_LED_BACKEND_MUSE && CONFIG_SPIRAM && CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC
-// On boards with the full UI, mbedTLS allocates from PSRAM, so HTTPS only adds a little
-// socket state and needs no large internal block. The display backends keep
-// the sizes they were tuned with.
+#if CONFIG_SPIRAM && CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC
+// Where mbedTLS allocates from PSRAM (its external allocator), the big
+// TLS record buffers never touch internal RAM, so HTTPS only adds a
+// little socket state and needs no large internal block. Up to v19
+// this relaxation was limited to the full-UI boards, and the display
+// backends kept the no-PSRAM sizes - on the RLCD-4.2 (PSRAM, external
+// allocator) that demanded 26 KB of internal RAM and one 17 KB block
+// for a download whose TLS buffers were going to PSRAM anyway, and
+// refused every HTTPS picture while the wake detector was resident.
 #define FETCH_TLS_BYTES     (8 * 1024)
 #define FETCH_TLS_BLOCK     1
 #else
@@ -189,6 +198,22 @@ static void log_memory(const char *stage) {
              (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_DMA) / 1024));
 }
 
+// Scratch buffers that only ever pass through the CPU - the JPEG
+// decoder's work pool and the raw row staging - belong in PSRAM where
+// there is some: they are a few KB each that plain malloc() used to
+// take from internal RAM (v20). Neither is ever handed to a DMA
+// engine; the display's own buffers live in led_status.c and keep
+// their DMA allocation there.
+static void *scratch_alloc(size_t size) {
+#if CONFIG_SPIRAM && !defined(LINK_FAKE_CUSTOM_HEAP_CAPS)
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    // The host harness routes malloc through its own accounting, which
+    // takes heap_caps_malloc to be the VM body allocation alone.
+    return malloc(size);
+#endif
+}
+
 // Bound the next socket operation by the time left. False once it is up,
 // when the next operation is left 1 ms so that a call in progress returns.
 static bool within_deadline(fetch_t *f) {
@@ -240,7 +265,7 @@ static int fetch_read(fetch_t *f, uint8_t *buf, size_t len) {
 
 static const char *draw_raw(fetch_t *f, int *rows_drawn) {
     const size_t row_bytes = (size_t)f->width * sizeof(uint16_t);
-    uint8_t *buf = malloc(RAW_ROWS * row_bytes);
+    uint8_t *buf = scratch_alloc(RAW_ROWS * row_bytes);
     if (!buf) return "out of memory";
     const char *err = NULL;
     int y = TOP_ROW(f);
@@ -306,7 +331,7 @@ static UINT jpeg_out(JDEC *jd, void *bitmap, JRECT *rect) {
 }
 
 static const char *draw_jpeg(fetch_t *f, int *out_w, int *out_h, int *out_scale) {
-    void *pool = malloc(JPEG_POOL_BYTES);
+    void *pool = scratch_alloc(JPEG_POOL_BYTES);
     if (!pool) return "out of memory";
     const char *err = NULL;
     JDEC jd;
@@ -848,6 +873,8 @@ static void fetch_task(void *arg) {
     free(f->url);
     free(f);
     atomic_store(&s_busy, false);
+    led_status_set_note(NULL);
+    activity_clear(ACTIVITY_IMAGE);
     vTaskDelete(NULL);
 }
 
@@ -945,8 +972,24 @@ static bool start(const char *target, bool vm, int row, image_fetch_done_cb done
         *message = "another image is still downloading";
         return false;
     }
+    // Accepted (v20): declare the activity before any memory check, so
+    // the shared activity state unloads the wake-word detector - the
+    // resident listener is what used to starve this download - and
+    // show that something is happening. The listener notices the gate
+    // within a chunk or two; wait for the unload to actually land
+    // before the gates below measure free RAM. fetch_task clears the
+    // activity (and the note) when the download ends.
+    activity_raise(ACTIVITY_IMAGE);
+    led_status_set_note("Receiving");
+#if CONFIG_SR_MN_EN_MULTINET6_QUANT
+    if (!wake_word_wait_unloaded(2000)) {
+        ESP_LOGW(TAG, "wake detector still resident after 2 s; trying anyway");
+    }
+#endif
     if (vm && !s_vm.lock && !(s_vm.lock = xSemaphoreCreateMutex())) {
         atomic_store(&s_busy, false);
+        activity_clear(ACTIVITY_IMAGE);
+        led_status_set_note(NULL);
         *code = "out_of_memory";
         *message = "failed to allocate";
         return false;
@@ -960,6 +1003,8 @@ static bool start(const char *target, bool vm, int row, image_fetch_done_cb done
         || (https && block < FETCH_TLS_BLOCK))) {
         log_memory("image download refused");
         atomic_store(&s_busy, false);
+        activity_clear(ACTIVITY_IMAGE);
+        led_status_set_note(NULL);
         *code = "out_of_memory";
         *message = https ? "not enough free memory for an HTTPS download; try http://"
                          : "not enough free memory for a download";
@@ -977,6 +1022,8 @@ static bool start(const char *target, bool vm, int row, image_fetch_done_cb done
         }
         free(f);
         atomic_store(&s_busy, false);
+        activity_clear(ACTIVITY_IMAGE);
+        led_status_set_note(NULL);
         *code = "out_of_memory";
         *message = "failed to allocate";
         return false;
@@ -993,6 +1040,8 @@ static bool start(const char *target, bool vm, int row, image_fetch_done_cb done
         free(f->url);
         free(f);
         atomic_store(&s_busy, false);
+        activity_clear(ACTIVITY_IMAGE);
+        led_status_set_note(NULL);
         *code = "out_of_memory";
         *message = "failed to start the download task";
         return false;

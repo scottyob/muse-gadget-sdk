@@ -36,3 +36,9 @@ ota_0,     app,  ota_0,   0x20000,  2M,
 ota_1,     app,  ota_1,   0x220000, 2M,
 prod_data, data, 0x40,    0x420000, 0x1000,
 prod_bak,  data, 0x41,    0x421000, 0x1000,
+# ESP-SR speech models (srmodels.bin) for the wake word, in flash space
+# the table never used (the chip is 16 MB). Appended only: every offset
+# above is unchanged, so OTA and the manufacturing partitions are
+# unaffected. The build packs the selected models into srmodels.bin and
+# flashes it here.
+model,     data, spiffs,  0x430000, 6M,
