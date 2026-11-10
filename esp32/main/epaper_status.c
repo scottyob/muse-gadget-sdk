@@ -458,6 +458,20 @@ void led_status_set_title(const char *title) {
     xTaskNotifyGive(s_task);
 }
 
+// The e-paper status screen has no note line or icon slots; the calls
+// exist so shared callers (voice, image fetch) link on every backend.
+void led_status_set_note(const char *note) {
+    (void)note;
+}
+
+void led_status_set_wake_icon(bool on) {
+    (void)on;
+}
+
+void led_status_set_call_icon(bool on) {
+    (void)on;
+}
+
 bool led_status_display_info(int *width, int *height) {
     if (!s_ready) return false;
     *width = EPD_W;

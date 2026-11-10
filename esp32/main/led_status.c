@@ -62,6 +62,9 @@
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_rom_sys.h"
+#elif CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+#include "driver/spi_master.h"
+#include "esp_lcd_panel_io.h"
 #endif
 #elif CONFIG_HOMEHUB_LED_BACKEND_MUSE
 #include "muse_glue.h"
@@ -187,6 +190,29 @@ _Static_assert((OLED_LINES - 1) * OLED_LINE_H + PIXEL_FONT_HEIGHT <= OLED_HEIGHT
 #define LCD_ANIM_SCALE   4
 #define LCD_DOT_MARGIN   6
 // Draw buffers are sent by SPI DMA.
+#elif CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+// Waveshare ESP32-S3-RLCD-4.2: 4.2 inch monochrome reflective LCD on a
+// Sitronix ST7305 over SPI, no backlight, no status LED. The panel runs in
+// its landscape 400x300 mode (Waveshare's proven orientation for this panel);
+// the 1-bit frame is 15,000 bytes. Pins from Waveshare's schematic.
+#define LCD_NAME         "Waveshare ESP32-S3-RLCD-4.2 ST7305"
+#define LCD_HOST         SPI2_HOST
+#define LCD_PIN_SCLK     11
+#define LCD_PIN_MOSI     12
+#define LCD_PIN_CS       40
+#define LCD_PIN_DC       5
+#define LCD_PIN_RST      41
+#define LCD_PCLK_HZ      (24 * 1000 * 1000)
+#define LCD_H_RES        400
+#define LCD_V_RES        300
+// No LCD_PIN_BL: the reflective panel has no backlight.
+#define LCD_BAR_ROWS     10
+// The animation fills the panel (140x147 art at scale 2 = 280x294 of
+// 400x300). The title overlays the animation's top band instead of
+// sitting above it; see the layout overrides below.
+#define LCD_ANIM_SCALE   2
+#define LCD_DOT_MARGIN   4
+// Draw buffers and the 1-bit frame buffer go by SPI DMA.
 #define LCD_BUF_CAPS     MALLOC_CAP_DMA
 #elif CONFIG_HOMEHUB_LED_BACKEND_SENSECAP_ST7701
 // SenseCAP Indicator: 480x480 ST7701S panel on a 16-bit RGB bus, refreshed
@@ -296,7 +322,7 @@ _Static_assert((OLED_LINES - 1) * OLED_LINE_H + PIXEL_FONT_HEIGHT <= OLED_HEIGHT
 // 16 rows above the animation. On the CYD the animation fills most of the
 // panel's height, so the title is drawn at half the size and closer to the
 // animation, below the connected dot.
-#if CONFIG_HOMEHUB_LED_BACKEND_CYD_ILI9341
+#if CONFIG_HOMEHUB_LED_BACKEND_CYD_ILI9341 || CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
 #define LCD_TITLE_MAX_SCALE 2
 #define LCD_TITLE_GAP    4
 #else
@@ -305,9 +331,26 @@ _Static_assert((OLED_LINES - 1) * OLED_LINE_H + PIXEL_FONT_HEIGHT <= OLED_HEIGHT
 #endif
 #define LCD_TITLE_ROWS   (PIXEL_FONT_HEIGHT * LCD_TITLE_MAX_SCALE)
 #define LCD_TITLE_Y      (LCD_ANIM_Y - LCD_TITLE_ROWS - LCD_TITLE_GAP)
+#if CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+// Side layout: the animation shifts left and the title moves into the
+// freed right-hand column, vertically centred. (At the top it was
+// clobbered by the status bar blanking and the connected dot.)
+#undef LCD_ANIM_X
+#define LCD_ANIM_X       2
+#undef LCD_TITLE_Y
+#define LCD_TITLE_Y      ((LCD_V_RES - LCD_TITLE_ROWS) / 2)
+#define LCD_TITLE_X      (LCD_ANIM_X + HAPPY_ANIM_WIDTH * LCD_ANIM_SCALE + 6)
+#define LCD_TITLE_W      (LCD_H_RES - LCD_TITLE_X - 2)
+#endif
+#ifndef LCD_TITLE_X
+#define LCD_TITLE_X      0
+#define LCD_TITLE_W      LCD_H_RES
+#endif
 // Neither the title nor the dot redraws the other, so they must not overlap.
+#if !CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
 _Static_assert(LCD_TITLE_Y >= LCD_BAR_ROWS && LCD_TITLE_Y >= LCD_DOT_Y + LCD_DOT_SIZE,
                "title overlaps the top status bar or the connected dot");
+#endif
 // Rows rendered per panel write; must fit s_bar_buf.
 #define LCD_TITLE_STRIPE_ROWS 8
 // Full-width rows that fit s_anim_buf.
@@ -320,6 +363,14 @@ static TaskHandle_t s_task = NULL;
 // Title requested by led_status_set_title(); the LED task draws it.
 static char s_title[48];
 static bool s_title_dirty = false;
+// Transient note (led_status_set_note) shown in place of the title
+// while the voice state is idle.
+static char s_note[48];
+static bool s_note_dirty = false;
+// Status icon switches (led_status_set_wake_icon/_call_icon); the
+// display code below paints them, other backends just keep the flags.
+static bool s_wake_icon = false;
+static bool s_call_icon = false;
 #if CONFIG_HOMEHUB_VOICE
 // How long the volume stays up after the dial stops.
 #define VOICE_VOLUME_MS 1500
@@ -700,6 +751,84 @@ static bool s_dot_drawn = false;
 static bool s_image_mode = false;
 static const uint8_t s_dot_rows[LCD_DOT_CELLS] = {0x6, 0xf, 0xf, 0x6};
 
+#if CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+// Status icons (v20): two fixed 24x24 slots at the bottom-right, just
+// above the bottom status bar and clear of the animation (which ends
+// at x=282) and the title column's text (vertically centred). The ear
+// shows while the wake-word detector is armed, the handset while a
+// call is in progress; lcd_overlay_rect() keeps them on top of drawn
+// images, and the LED task paints them directly otherwise - the same
+// arrangement as the connected dot. 'X' is ink, '.' is paper.
+#define LCD_ICON_SIZE   24
+#define LCD_ICON_GAP    6
+#define LCD_ICON_Y      (LCD_V_RES - LCD_BAR_ROWS - LCD_ICON_GAP - LCD_ICON_SIZE)
+#define LCD_ICON_X_CALL (LCD_H_RES - LCD_ICON_GAP - LCD_ICON_SIZE)
+#define LCD_ICON_X_EAR  (LCD_ICON_X_CALL - LCD_ICON_GAP - LCD_ICON_SIZE)
+
+static const char *const s_ear_rows[LCD_ICON_SIZE] = {
+    "........................",
+    ".......XXXXXXXXX........",
+    ".....XXXXXXXXXXXXX......",
+    "....XXX..........XX.....",
+    "...XXX............XX....",
+    "...XXX....XXXXXXX..XX...",
+    "...XXX...XX....XXX..XX..",
+    "...XXX..........XX..XX..",
+    "...XXX..........XX..XX..",
+    "...XXX.XX.......XX..XX..",
+    "...XXX.XX......XX...XX..",
+    "...XXX..X....XXX....XX..",
+    "...XXX....XXXX......XX..",
+    "...XXX..............XX..",
+    "...XXXX............XX...",
+    "...XXXX............XX...",
+    "....XXXX..........XX....",
+    "....XXXX..........XX....",
+    ".....XXXXXXXXXXXXXX.....",
+    ".......XXXXXXXXXXX......",
+    "........................",
+    "........................",
+    "........................",
+    "........................",
+};
+// A handset seen from the front: two earpiece blocks joined by the
+// band that curves down between them.
+static const char *const s_phone_rows[LCD_ICON_SIZE] = {
+    "........................",
+    "........................",
+    "........................",
+    "........................",
+    "..XXXX............XXXXX.",
+    "..XXXX............XXXXX.",
+    "..XXXX............XXXXX.",
+    ".XXXXXX..........XXXXXX.",
+    "XXXXXXX..........XXXXXXX",
+    "XXXXXXXX.........XXXXXXX",
+    "XXXXXXX..........XXXXXXX",
+    ".XXXXXX..........XXXXXXX",
+    ".XXXXXXX........XXXXXXX.",
+    "...XXXXXXXXXXXXXXXXXX...",
+    "....XXXXXXXXXXXXXXXX....",
+    ".....XXXXXXXXXXXXXX.....",
+    ".......XXXXXXXXXX.......",
+    "..........XXXX..........",
+    "........................",
+    "........................",
+    "........................",
+    "........................",
+    "........................",
+    "........................",
+};
+
+static bool icon_cell(const char *const *rows, int x, int y) {
+    return rows[y][x] == 'X';
+}
+
+// The icons as last painted by the LED task (lcd_sync_icons).
+static bool s_ear_drawn = false;
+static bool s_phone_drawn = false;
+#endif
+
 #if CONFIG_HOMEHUB_LED_BACKEND_IDEASPARK_ST7789 || CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_C6_ST7789 || CONFIG_HOMEHUB_LED_BACKEND_CYD_ILI9341 \
     || CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_ST7796
 static SemaphoreHandle_t s_draw_done = NULL;
@@ -731,6 +860,106 @@ static bool lcd_draw(int x0, int y0, int x1, int y1, const uint16_t *buf) {
 }
 
 // The frame buffer holds native (little-endian) RGB565.
+static uint16_t lcd_from_be(uint16_t px) {
+    return (uint16_t)((px >> 8) | (px << 8));
+}
+#elif CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+// 1-bit frame buffer in the ST7305's landscape 2x4 packing: each byte holds
+// 2 columns x 4 rows (bit 7 = row 0 col 0, down to bit 0 = row 3 col 1),
+// rows counted from the bottom, black = bit clear. Follows Waveshare's
+// InitLandscapeLUT for this panel.
+#define LCD_FB_SIZE (LCD_H_RES * LCD_V_RES / 8)
+static uint8_t *s_fb = NULL;
+static esp_lcd_panel_io_handle_t s_io = NULL;
+// A dedicated task coalesces draws without restarting its deadline.
+// It holds the drawing lock through a synchronous SPI transfer.
+static TaskHandle_t s_flush_task = NULL;
+static bool s_fb_dirty = false;
+#define LCD_FLUSH_DELAY_MS 30
+
+// 8x8 Bayer matrix for ordered dithering on the 1-bit panel.
+static const uint8_t s_bayer[64] = {
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21,
+};
+
+static esp_err_t rlcd_flush(void) {
+    esp_err_t err = esp_lcd_panel_io_tx_param(s_io, 0x2A,
+                                            (const uint8_t[]){0x12, 0x2A}, 2);
+    if (err == ESP_OK) err = esp_lcd_panel_io_tx_param(s_io, 0x2B,
+                                            (const uint8_t[]){0x00, 0xC7}, 2);
+    // tx_param waits for completion; drawing cannot overwrite an in-flight frame.
+    if (err == ESP_OK) err = esp_lcd_panel_io_tx_param(s_io, 0x2C, s_fb, LCD_FB_SIZE);
+    if (err == ESP_OK) s_fb_dirty = false;
+    return err;
+}
+
+static void rlcd_flush_task(void *arg) {
+    (void)arg;
+    unsigned long frames = 0;
+    int64_t last_report = 0;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        bool retry;
+        do {
+            vTaskDelay(pdMS_TO_TICKS(LCD_FLUSH_DELAY_MS));
+            xSemaphoreTake(s_lcd_lock, portMAX_DELAY);
+            esp_err_t err = ESP_OK;
+            if (s_fb_dirty && s_io) {
+                err = rlcd_flush();
+                if (err == ESP_OK) ++frames;
+            }
+            retry = s_fb_dirty;
+            xSemaphoreGive(s_lcd_lock);
+            int64_t now = esp_timer_get_time();
+            if (last_report == 0 || now - last_report >= 5000000) {
+                ESP_LOGI(TAG, "RLCD transport: frames=%lu last=%s dirty=%d",
+                         frames, esp_err_to_name(err), retry);
+                last_report = now;
+            }
+        } while (retry);
+    }
+}
+
+// Merge one native RGB565 pixel into the 1-bit frame buffer, paper-like:
+// the UI's black background becomes white paper and brighter UI pixels
+// become black ink, with ink coverage proportional to luminance across
+// the full 0-255 range (8x8 ordered dither). An earlier low threshold
+// (Bayer * 2, max 30) saturated everything above ~12% brightness to
+// solid black, which turned grey UI elements and image shading into
+// undifferentiated blobs.
+static void rlcd_set_pixel(int x, int y, uint16_t px) {
+    if (x < 0 || x >= LCD_H_RES || y < 0 || y >= LCD_V_RES) return;
+    int r = (px >> 11) & 0x1F, g = (px >> 5) & 0x3F, b = px & 0x1F;
+    int lum = (r * 255 / 31) * 299 / 1000 + (g * 255 / 63) * 587 / 1000 +
+              (b * 255 / 31) * 114 / 1000;
+    bool black = lum > s_bayer[(y & 7) * 8 + (x & 7)] * 4 + 2;
+    int inv_y = LCD_V_RES - 1 - y;
+    int idx = (x >> 1) * (LCD_V_RES >> 2) + (inv_y >> 2);
+    uint8_t bit = (uint8_t)(1 << (7 - (((inv_y & 3) << 1) | (x & 1))));
+    if (black) s_fb[idx] &= (uint8_t)~bit;
+    else s_fb[idx] |= bit;
+}
+
+// Merge the RGB565 rect into the frame buffer; the panel update follows on
+// the flush task. Caller holds s_lcd_lock.
+static bool lcd_draw(int x0, int y0, int x1, int y1, const uint16_t *buf) {
+    int w = x1 - x0, h = y1 - y0;
+    for (int r = 0; r < h; r++)
+        for (int c = 0; c < w; c++)
+            rlcd_set_pixel(x0 + c, y0 + r, buf[r * w + c]);
+    s_fb_dirty = true;
+    xTaskNotifyGive(s_flush_task);
+    return true;
+}
+
+// Buffers hold native (little-endian) RGB565; the converter reads them so.
 static uint16_t lcd_from_be(uint16_t px) {
     return (uint16_t)((px >> 8) | (px << 8));
 }
@@ -773,6 +1002,62 @@ static void lcd_draw_dot(bool on) {
     xSemaphoreGive(s_lcd_lock);
 }
 
+#if CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+// The icons are painted in the title's cream, the panel's "ink" colour.
+static uint16_t icon_px(void) {
+    return lcd_px((rgb_t){0xff, 0xee, 0xde});
+}
+
+// Paint one icon slot over `buf` where it intersects, or erase it.
+// Caller holds s_lcd_lock.
+static void overlay_icon(uint16_t *buf, int x0, int y0, int w, int h,
+                         int ix, const char *const *rows, bool on) {
+    uint16_t px = icon_px();
+    int dy = y0 - LCD_ICON_Y;
+    for (int r = 0; r < h; r++, dy++) {
+        if (dy < 0 || dy >= LCD_ICON_SIZE) continue;
+        uint16_t *line = buf + r * w;
+        for (int dx = 0; dx < LCD_ICON_SIZE; dx++) {
+            int x = ix + dx - x0;
+            if (x >= 0 && x < w && icon_cell(rows, dx, dy)) line[x] = on ? px : 0;
+        }
+    }
+}
+
+// Draw one icon slot straight to the panel. Uses s_bar_buf: LED task
+// only, like lcd_draw_dot().
+static void lcd_draw_icon(int ix, const char *const *rows, bool on) {
+    uint16_t px = icon_px();
+    for (int y = 0; y < LCD_ICON_SIZE; y++) {
+        for (int x = 0; x < LCD_ICON_SIZE; x++) {
+            s_bar_buf[y * LCD_ICON_SIZE + x] = on && icon_cell(rows, x, y) ? px : 0;
+        }
+    }
+    xSemaphoreTake(s_lcd_lock, portMAX_DELAY);
+    lcd_draw(ix, LCD_ICON_Y, ix + LCD_ICON_SIZE, LCD_ICON_Y + LCD_ICON_SIZE, s_bar_buf);
+    xSemaphoreGive(s_lcd_lock);
+}
+
+// Bring the painted icons in line with the requested ones. LED task
+// only; called every pass, so a change shows within a frame or two.
+static void lcd_sync_icons(void) {
+    bool ear, phone;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    ear = s_wake_icon;
+    phone = s_call_icon;
+    xSemaphoreGive(s_mutex);
+    if (!s_panel) return;
+    if (ear != s_ear_drawn) {
+        lcd_draw_icon(LCD_ICON_X_EAR, s_ear_rows, ear);
+        s_ear_drawn = ear;
+    }
+    if (phone != s_phone_drawn) {
+        lcd_draw_icon(LCD_ICON_X_CALL, s_phone_rows, phone);
+        s_phone_drawn = phone;
+    }
+}
+#endif
+
 // Paint the status (coloured bars, the connected dot) over the w x h pixels of
 // `buf` that land at (x0, y0), so it stays on top of whatever else is drawn
 // there. Caller holds s_lcd_lock.
@@ -793,6 +1078,12 @@ static void lcd_overlay_rect(uint16_t *buf, int x0, int y0, int w, int h) {
             }
         }
     }
+#if CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+    // The status icons stay on top of images too (the drawn mirrors
+    // say what's showing; lcd_sync_icons paints changes directly).
+    if (s_ear_drawn) overlay_icon(buf, x0, y0, w, h, LCD_ICON_X_EAR, s_ear_rows, true);
+    if (s_phone_drawn) overlay_icon(buf, x0, y0, w, h, LCD_ICON_X_CALL, s_phone_rows, true);
+#endif
 }
 
 static void lcd_overlay_status(uint16_t *buf, int y0, int rows) {
@@ -842,19 +1133,22 @@ static void led_hw_set_title(const char *text) {
     const int adv = PIXEL_FONT_WIDTH + 1;
     int n = (int)strlen(text);
     int scale = LCD_TITLE_MAX_SCALE;
-    while (scale > 2 && n * adv * scale - scale > LCD_H_RES) scale--;
-    if (n > (LCD_H_RES + scale) / (adv * scale)) n = (LCD_H_RES + scale) / (adv * scale);
+    // A narrow title column (RLCD side layout) may shrink to scale 1;
+    // full-width titles keep the stock scale-2 floor.
+    const int min_scale = LCD_TITLE_W < LCD_H_RES ? 1 : 2;
+    while (scale > min_scale && n * adv * scale - scale > LCD_TITLE_W) scale--;
+    if (n > (LCD_TITLE_W + scale) / (adv * scale)) n = (LCD_TITLE_W + scale) / (adv * scale);
     int w = n > 0 ? n * adv * scale - scale : 0;
-    int x0 = (LCD_H_RES - w) / 2;
+    int x0 = LCD_TITLE_X + (LCD_TITLE_W - w) / 2;
     int y0 = (LCD_TITLE_ROWS - PIXEL_FONT_HEIGHT * scale) / 2;
     uint16_t fg = lcd_px((rgb_t){0xff, 0xee, 0xde});  // animation's cream
 
     for (int sy = 0; sy < LCD_TITLE_ROWS; sy += LCD_TITLE_STRIPE_ROWS) {
         for (int r = 0; r < LCD_TITLE_STRIPE_ROWS; r++) {
-            uint16_t *line = s_bar_buf + r * LCD_H_RES;
+            uint16_t *line = s_bar_buf + r * LCD_TITLE_W;
             int fy = sy + r - y0;
-            for (int x = 0; x < LCD_H_RES; x++) {
-                int fx = x - x0;
+            for (int x = 0; x < LCD_TITLE_W; x++) {
+                int fx = LCD_TITLE_X + x - x0;
                 bool on = false;
                 if (fy >= 0 && fy < PIXEL_FONT_HEIGHT * scale && fx >= 0 && fx < w) {
                     int col = fx / scale;
@@ -869,7 +1163,8 @@ static void led_hw_set_title(const char *text) {
         }
         xSemaphoreTake(s_lcd_lock, portMAX_DELAY);
         if (!s_image_mode) {
-            lcd_draw(0, LCD_TITLE_Y + sy, LCD_H_RES,
+            lcd_draw(LCD_TITLE_X, LCD_TITLE_Y + sy,
+                     LCD_TITLE_X + LCD_TITLE_W,
                      LCD_TITLE_Y + sy + LCD_TITLE_STRIPE_ROWS, s_bar_buf);
         }
         xSemaphoreGive(s_lcd_lock);
@@ -901,15 +1196,42 @@ static void lcd_draw_anim_frame(const uint8_t *cells) {
             }
         }
         int y = LCD_ANIM_Y + cy * LCD_ANIM_SCALE;
-        lcd_draw(LCD_ANIM_X, y, LCD_ANIM_X + w, y + rows * LCD_ANIM_SCALE, s_anim_buf);
+        lcd_draw(LCD_ANIM_X, y, LCD_ANIM_X + w,
+                 y + rows * LCD_ANIM_SCALE, s_anim_buf);
         xSemaphoreGive(s_lcd_lock);
     }
 }
 
 static void anim_task(void *arg) {
     TickType_t wake = xTaskGetTickCount();
-    for (int frame = 0;; frame = (frame + 1) % HAPPY_ANIM_FRAMES) {
-        lcd_draw_anim_frame(happy_anim_frames[frame]);
+    int frame = 0, talk_frame = 0;
+    for (;;) {
+#ifdef HAPPY_ANIM_TALK_FRAMES
+        // While Muse is speaking, play the talking-beak bank instead
+        // of the idle loop.
+        if (s_voice == LED_VOICE_SPEAKING) {
+#ifdef HAPPY_ANIM_TALK_TICKS
+            // Stored frames are the distinct poses; the map stretches
+            // them over the 40 ms tick timeline.
+            lcd_draw_anim_frame(
+                happy_anim_talk_frames[happy_anim_talk_map[talk_frame]]);
+            talk_frame = (talk_frame + 1) % HAPPY_ANIM_TALK_TICKS;
+#else
+            lcd_draw_anim_frame(happy_anim_talk_frames[talk_frame]);
+            talk_frame = (talk_frame + 1) % HAPPY_ANIM_TALK_FRAMES;
+#endif
+        } else
+#endif
+        {
+#ifdef HAPPY_ANIM_IDLE_TICKS
+            lcd_draw_anim_frame(
+                happy_anim_frames[happy_anim_idle_map[frame]]);
+            frame = (frame + 1) % HAPPY_ANIM_IDLE_TICKS;
+#else
+            lcd_draw_anim_frame(happy_anim_frames[frame]);
+            frame = (frame + 1) % HAPPY_ANIM_FRAMES;
+#endif
+        }
         xTaskDelayUntil(&wake, pdMS_TO_TICKS(HAPPY_ANIM_FRAME_MS));
     }
 }
@@ -1272,6 +1594,128 @@ static esp_err_t lcd_panel_init(void) {
 static esp_err_t lcd_panel_on(void) {
     return ESP_OK;
 }
+#elif CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+typedef struct {
+    uint8_t cmd, len;
+    uint16_t delay_ms;
+    uint8_t data[10];
+} st7305_cmd_t;
+
+// ST7305 setup for this 4.2 inch panel in landscape 400x300, from Waveshare's
+// own driver: charge pump, gate/source voltages, frame rate, gate timing,
+// 300 gate lines, then 1-bit mono mode, MADCTL MX=1 DO=1, and the panel's
+// address window.
+static const st7305_cmd_t s_st7305_init[] = {
+    {0xD6, 2, 0,   {0x17, 0x02}},
+    {0xD1, 1, 0,   {0x01}},
+    {0xC0, 2, 0,   {0x11, 0x04}},
+    {0xC1, 4, 0,   {0x69, 0x69, 0x69, 0x69}},
+    {0xC2, 4, 0,   {0x19, 0x19, 0x19, 0x19}},
+    {0xC4, 4, 0,   {0x4B, 0x4B, 0x4B, 0x4B}},
+    {0xC5, 4, 0,   {0x19, 0x19, 0x19, 0x19}},
+    {0xD8, 2, 0,   {0x80, 0xE9}},
+    {0xB2, 1, 0,   {0x02}},
+    {0xB3, 10, 0,  {0xE5, 0xF6, 0x05, 0x46, 0x77, 0x77, 0x77, 0x77, 0x76, 0x45}},
+    {0xB4, 8, 0,   {0x05, 0x46, 0x77, 0x77, 0x77, 0x77, 0x76, 0x45}},
+    {0x62, 3, 0,   {0x32, 0x03, 0x1F}},
+    {0xB7, 1, 0,   {0x13}},
+    {0xB0, 1, 0,   {0x64}},  // 100 * 3 = 300 gate lines
+    {0x11, 0, 200, {0}},     // sleep out
+    {0xC9, 1, 0,   {0x00}},
+    {0x36, 1, 0,   {0x48}},  // MX=1, DO=1: landscape
+    {0x3A, 1, 0,   {0x11}},  // 1-bit monochrome
+    {0xB9, 1, 0,   {0x20}},  // mono gamma
+    {0xB8, 1, 0,   {0x29}},
+    {0x21, 0, 0,   {0}},     // inversion on
+    {0x2A, 2, 0,   {0x12, 0x2A}},
+    {0x2B, 2, 0,   {0x00, 0xC7}},
+    {0x35, 1, 0,   {0x00}},
+    {0xD0, 1, 0,   {0xFF}},
+};
+
+static esp_err_t lcd_panel_init(void) {
+    gpio_config_t rst_cfg = {
+        .pin_bit_mask = 1ULL << LCD_PIN_RST,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    esp_err_t err = gpio_config(&rst_cfg);
+    if (err == ESP_OK) {
+        gpio_set_level(LCD_PIN_RST, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(LCD_PIN_RST, 0);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        gpio_set_level(LCD_PIN_RST, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    spi_bus_config_t bus_cfg = {
+        .sclk_io_num = LCD_PIN_SCLK,
+        .mosi_io_num = LCD_PIN_MOSI,
+        .miso_io_num = -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_FB_SIZE,
+    };
+    if (err == ESP_OK) err = spi_bus_initialize(LCD_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    esp_lcd_panel_io_spi_config_t io_cfg = {
+        .cs_gpio_num = LCD_PIN_CS,
+        .dc_gpio_num = LCD_PIN_DC,
+        .spi_mode = 0,
+        .pclk_hz = LCD_PCLK_HZ,
+        .trans_queue_depth = 4,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+    };
+    if (err == ESP_OK) {
+        err = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io);
+    }
+    for (size_t i = 0; err == ESP_OK && i < sizeof(s_st7305_init) / sizeof(s_st7305_init[0]); i++) {
+        const st7305_cmd_t *c = &s_st7305_init[i];
+        err = esp_lcd_panel_io_tx_param(s_io, c->cmd, c->data, c->len);
+        if (err == ESP_OK && c->delay_ms) vTaskDelay(pdMS_TO_TICKS(c->delay_ms));
+    }
+    if (err == ESP_OK) {
+        s_fb = heap_caps_malloc(LCD_FB_SIZE, LCD_BUF_CAPS);
+        if (!s_fb) {
+            err = ESP_ERR_NO_MEM;
+        } else {
+            memset(s_fb, 0xFF, LCD_FB_SIZE);
+        }
+    }
+    if (err == ESP_OK) {
+        if (xTaskCreate(rlcd_flush_task, "rlcd_flush", 3072, NULL, 2,
+                        &s_flush_task) != pdPASS) err = ESP_ERR_NO_MEM;
+    }
+    if (err == ESP_OK) {
+        // Non-NULL sentinel: the status code only tests s_panel, all panel
+        // I/O goes through s_io above.
+        s_panel = (esp_lcd_panel_handle_t)&s_io;
+    }
+    return err;
+}
+
+static esp_err_t lcd_panel_on(void) {
+    esp_err_t err = esp_lcd_panel_io_tx_param(s_io, 0x38, NULL, 0);
+    if (err == ESP_OK) err = esp_lcd_panel_io_tx_param(s_io, 0x29, NULL, 0);
+    // A visible boot test distinguishes a working panel from a retained image.
+    // The drawing/flush tasks cannot touch the buffer during this test.
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_lcd_lock, portMAX_DELAY);
+        for (int y = 0; y < LCD_V_RES; ++y)
+            for (int x = 0; x < LCD_H_RES; ++x)
+                rlcd_set_pixel(x, y, ((x / 50 + y / 50) & 1) ? 0xFFFF : 0);
+        s_fb_dirty = true;
+        err = rlcd_flush();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "RLCD boot checkerboard sent (1500 ms)");
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            memset(s_fb, 0xFF, LCD_FB_SIZE);
+            s_fb_dirty = true;
+            err = rlcd_flush();
+        }
+        xSemaphoreGive(s_lcd_lock);
+    }
+    return err;
+}
 #endif
 
 static bool led_hw_init(void) {
@@ -1293,18 +1737,26 @@ static bool led_hw_init(void) {
         return false;
     }
 
+    // The reflective LCD has no backlight (no LCD_PIN_BL on its backend).
+#ifdef LCD_PIN_BL
     gpio_config_t bl_cfg = {
         .pin_bit_mask = 1ULL << LCD_PIN_BL,
         .mode = GPIO_MODE_OUTPUT,
     };
     gpio_config(&bl_cfg);
     gpio_set_level(LCD_PIN_BL, 1);
+#endif
 
     // Lower priority than the LED task so status changes are never delayed.
     xTaskCreate(anim_task, "lcd_anim", 2560, NULL, 1, NULL);
 
+#ifdef LCD_PIN_BL
     ESP_LOGI(TAG, "LED status ready: " LCD_NAME " %dx%d display (BL=%d)",
              LCD_H_RES, LCD_V_RES, LCD_PIN_BL);
+#else
+    ESP_LOGI(TAG, "LED status ready: " LCD_NAME " %dx%d display",
+             LCD_H_RES, LCD_V_RES);
+#endif
     return true;
 }
 #elif CONFIG_HOMEHUB_LED_BACKEND_MUSE
@@ -1380,6 +1832,7 @@ static void led_wait(int ms) {
 // Three 200 ms flashes.
 #define VOICE_ERROR_FRAMES 30
 
+#if CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE
 static rgb_t scaled(rgb_t c, float level) {
     return (rgb_t){c.r * level, c.g * level, c.b * level};
 }
@@ -1472,18 +1925,57 @@ static bool voice_render(void) {
     vTaskDelay(pdMS_TO_TICKS(VOICE_FRAME_MS));
     return true;
 }
+#else
+// Display backends have no LED ring: show the voice state as the status
+// screen's title instead, as the Mac RLCD build did.
+static bool voice_render(void) {
+    static led_voice_t last = LED_VOICE_IDLE;
+    static int error_frames;
+    char title[sizeof(s_title)];
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    led_voice_t voice = s_voice;
+    memcpy(title, s_note[0] ? s_note : s_title, sizeof(title));
+    if (voice == LED_VOICE_ERROR && ++error_frames >= VOICE_ERROR_FRAMES)
+        voice = s_voice = LED_VOICE_IDLE;
+    if (voice != LED_VOICE_ERROR) error_frames = 0;
+    xSemaphoreGive(s_mutex);
+    if (voice != last) {
+        const char *labels[] = {"", "Listening", "Transcribing", "Thinking",
+                                "Buffering", "Speaking", "Voice error"};
+        led_hw_set_title(voice == LED_VOICE_IDLE ? title : labels[voice]);
+        last = voice;
+    }
+    if (voice == LED_VOICE_IDLE) return false;
+    led_wait(VOICE_FRAME_MS);
+    return true;
+}
+#endif
 #endif
 
 static void led_task(void *arg) {
     stack_monitor_t stack = STACK_MONITOR_INIT;
     while (1) {
         stack_monitor_poll(&stack);
+#if CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+        lcd_sync_icons();
+#endif
         char title[sizeof(s_title)];
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         led_state_t state = s_state;
-        bool title_dirty = s_title_dirty;
-        if (title_dirty) memcpy(title, s_title, sizeof(title));
+        bool title_dirty = s_title_dirty || s_note_dirty;
+        if (title_dirty) {
+            // The note stands in for the title, except while a voice
+            // state owns the title area (its labels win; the note is
+            // picked up when the state returns to idle).
+#if CONFIG_HOMEHUB_VOICE
+            bool voice_active = s_voice != LED_VOICE_IDLE;
+#else
+            bool voice_active = false;
+#endif
+            memcpy(title, s_note[0] && !voice_active ? s_note : s_title, sizeof(title));
+        }
         s_title_dirty = false;
+        s_note_dirty = false;
         xSemaphoreGive(s_mutex);
         if (title_dirty) led_hw_set_title(title);
 #if CONFIG_HOMEHUB_LED_BACKEND_C3_SSD1306
@@ -1595,6 +2087,31 @@ void led_status_set_title(const char *title) {
     xSemaphoreGive(s_mutex);
 }
 
+void led_status_set_note(const char *note) {
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    snprintf(s_note, sizeof(s_note), "%s", note ? note : "");
+    s_note_dirty = true;
+    xSemaphoreGive(s_mutex);
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
+void led_status_set_wake_icon(bool on) {
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_wake_icon = on;
+    xSemaphoreGive(s_mutex);
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
+void led_status_set_call_icon(bool on) {
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_call_icon = on;
+    xSemaphoreGive(s_mutex);
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
 #if CONFIG_HOMEHUB_VOICE
 void led_status_set_voice(led_voice_t voice) {
     if (!s_mutex) return;
@@ -1666,7 +2183,8 @@ static bool lcd_draw_image_rect(int x, int y, int w, int h, const void *pixels) 
     || CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_ST7796
     // Already in the panel's format; copied only to reach DMA memory.
     memcpy(s_anim_buf, pixels, (size_t)w * h * sizeof(uint16_t));
-#elif CONFIG_HOMEHUB_LED_BACKEND_SENSECAP_ST7701
+#elif CONFIG_HOMEHUB_LED_BACKEND_SENSECAP_ST7701 || \
+      CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
     const uint8_t *src = pixels;
     for (int i = 0; i < w * h; i++) s_anim_buf[i] = (uint16_t)(src[2 * i] << 8 | src[2 * i + 1]);
 #endif

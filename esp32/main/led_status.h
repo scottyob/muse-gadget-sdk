@@ -42,6 +42,18 @@ void led_status_set_state(led_state_t state);
 // Show a short title (the agent's name) on backends with a display; NULL or ""
 // clears it. Other backends ignore it.
 void led_status_set_title(const char *title);
+// Show a transient note in place of the title while the voice state is
+// idle (v20: "Receiving" while a picture downloads, before its first
+// pixels replace the screen). NULL or "" clears it. Display backends
+// only; the voice state's own labels take precedence over the note.
+void led_status_set_note(const char *note);
+// Status icons in fixed slots at the bottom-right of the screen (v20),
+// painted over the animation and any shown image, like the connected
+// dot: the ear while the wake-word detector is armed and listening,
+// the handset while a realtime call is in progress. Display backends
+// only; other backends ignore them.
+void led_status_set_wake_icon(bool on);
+void led_status_set_call_icon(bool on);
 
 // Display backends only: the screen size in pixels. Returns false without a
 // display.

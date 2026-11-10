@@ -13,6 +13,7 @@
 # limitations under the License.
 
 dependencies:
+  espressif/esp-sr: "^2.1"
   espressif/esp_websocket_client: "~1.2"
   espressif/cjson: "~1.7"
   espressif/led_strip: "~3.0"
@@ -24,11 +25,13 @@ dependencies:
   espressif/esp_codec_dev:
     version: "~1.5"
     # In this order: rules stop at the first false one, and each option
-    # exists only when the rule before it holds.
+    # exists only when the rule before it holds. The RLCD-4.2 joined the
+    # ePaper-1.54G here in the RLCD rebase: both voice boards drive their
+    # ES8311/ES7210 codecs through this component.
     rules:
       - if: "$IDF_TARGET == esp32s3"
       - if: "$CONFIG{SPIRAM} == True"
-      - if: "$CONFIG{HOMEHUB_LED_BACKEND_WAVESHARE_EPD154G} == True"
+      - if: "$CONFIG{HOMEHUB_LED_BACKEND_WAVESHARE_EPD154G} == True || $CONFIG{HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42} == True"
       - if: "$CONFIG{HOMEHUB_VOICE} == True"
   # The Waveshare ESP32-S3-Touch-LCD-3.5 status screen. The same range as
   # components/muse, which the Waveshare P4 3.5 needs.

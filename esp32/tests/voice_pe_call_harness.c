@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "host_compat.h"
+#include "activity.h"
 
 /* Logged lines, to check none carries caller text. */
 static char s_log[8192];
@@ -142,6 +143,9 @@ size_t voice_player_queued(void) { return 0; }
 void led_status_set_voice(led_voice_t voice) { (void)voice; }
 void led_status_set_level(float level) { (void)level; }
 void led_status_show_volume(int percent) { (void)percent; }
+void led_status_set_call_icon(bool on) { (void)on; }
+void activity_raise(activity_t source) { (void)source; }
+void activity_clear(activity_t source) { (void)source; }
 bool config_get_str(const char *key, char *out, size_t cap) { (void)key; (void)out; (void)cap; return false; }
 bool config_set_str(const char *key, const char *value) { (void)key; (void)value; return true; }
 void button_set_press_cb(button_press_cb cb) { (void)cb; }
@@ -212,18 +216,22 @@ int main(int argc, char **argv)
     int which = atoi(argv[1]);
     reset();
     if (which == 0) {
-        /* The switch goes on during the 5th capture: that chunk and every one after stay put. */
-        s_mute_on_read = 5;
+        /* The switch goes on during the 35th capture: that chunk and every one after stay put. */
+        s_mute_on_read = 35;
     } else if (which == 1) {
         /* ...or right after a check: the chunk captured before it may go, the next may not. */
-        s_mute_after_read = 5;
+        s_mute_after_read = 35;
     } else {
         return 2;
     }
     run_call();
     assert(s_end_calls == 1);
     assert(s_audio_while_muted == 0);
-    assert(s_audio_calls == (which == 0 ? 3 : 4));   /* reads 2-4 (and 5) after READY on read 1 */
+    /* This fork's run_call plays a start chime through the half-duplex
+     * gate, so the mic stays shut for the first ~19 reads (READY is on
+     * read 1, the first chunk goes out on read 20); upstream's chime-less
+     * loop sent from read 2 and expected 3 (or 4). */
+    assert(s_audio_calls == (which == 0 ? 15 : 16));   /* reads 20-34 (and 35) */
     assert(!strstr(s_log, "SECRET"));
     printf("ok %d chunks before mute\n", s_audio_calls);
     return 0;

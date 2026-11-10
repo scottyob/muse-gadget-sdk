@@ -412,7 +412,8 @@ menu "ESP32 Device SDK"
             on the E1002).
             The Waveshare ESP32-S3-ePaper-1.54G does the same in four colours.
             The ESP32-C3 with a 0.42 inch OLED shows the status and the
-            agent's name as text.
+            agent's name as text. The Waveshare ESP32-S3-RLCD-4.2 shows the
+            status bars and animation on its 4.2 inch monochrome reflective LCD.
             Boards with the full UI have no status LED; their screen shows Link's pairing
             and connection state instead.
 
@@ -434,6 +435,10 @@ menu "ESP32 Device SDK"
 
         config HOMEHUB_LED_BACKEND_SENSECAP_ST7701
             bool "SenseCAP Indicator 4 inch ST7701S RGB display (status bars)"
+            depends on IDF_TARGET_ESP32S3 && SPIRAM
+
+        config HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
+            bool "Waveshare ESP32-S3-RLCD-4.2 4.2 inch ST7305 reflective LCD (status bars)"
             depends on IDF_TARGET_ESP32S3 && SPIRAM
 
         config HOMEHUB_LED_BACKEND_WAVESHARE_S3_ST7796
@@ -517,6 +522,7 @@ menu "ESP32 Device SDK"
         default y if HOMEHUB_LED_BACKEND_WAVESHARE_C6_ST7789
         default y if HOMEHUB_LED_BACKEND_CYD_ILI9341
         default y if HOMEHUB_LED_BACKEND_SENSECAP_ST7701
+        default y if HOMEHUB_LED_BACKEND_WAVESHARE_S3_RLCD42
         default y if HOMEHUB_LED_BACKEND_WAVESHARE_S3_ST7796
         default y if HOMEHUB_LED_BACKEND_RETERMINAL_UC8179
         default y if HOMEHUB_LED_BACKEND_RETERMINAL_SPECTRA6
@@ -572,6 +578,10 @@ menu "ESP32 Device SDK"
 
         config HOMEHUB_VOICE_BOARD_WAVESHARE_154G
             bool "Waveshare ESP32-S3-ePaper-1.54G"
+            depends on IDF_TARGET_ESP32S3
+
+        config HOMEHUB_VOICE_BOARD_RLCD42
+            bool "Waveshare ESP32-S3-RLCD-4.2"
             depends on IDF_TARGET_ESP32S3
 
     endchoice
